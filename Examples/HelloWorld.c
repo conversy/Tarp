@@ -74,9 +74,15 @@ int main(int argc, char * argv[])
 
         path = tpPathCreate();
         tpPathAddCircle(path, 400, 300, 100);
+        tpPathAddCircle(path, 400, 300, 20);
+
+        tpMat3 mat = tpMat3MakeTranslation(0, 100);
+        tpPathSetContourTransform(path, 1, &mat);
 
         style = tpStyleCreate();
         tpStyleSetFillColor(style, 1.0, 0.0, 0.0, 1.0);
+
+        tpStyleRemoveStroke(style);
 
         /* the main loop */
         while (!glfwWindowShouldClose(window))

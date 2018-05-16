@@ -3478,6 +3478,7 @@ TARP_LOCAL void _tpGLPreparePathForRendering(_tpGLContext * _ctx, _tpGLPath * _p
     tpFloat angleTolerance;
     tpBool bReflattenAll = (tpBool)(_path->lastDrawContext != _ctx || _path->lastTransformScale < _ctx->transformScale);
 
+
     _tpGLInitBounds(&pathBounds);
 
     for (i = 0; i < _path->contours.count; ++i)
@@ -3593,7 +3594,19 @@ TARP_LOCAL void _tpGLPreparePathForRendering(_tpGLContext * _ctx, _tpGLPath * _p
             c->bounds = contourBounds;
             off += vcount;
 
-            _tpGLMergeBounds(&pathBounds, &contourBounds);
+            /*
+            if the contour has a transform, we bring it to path space...this will result in the bb for the path to not sit
+            super tight anymore but that seems like a decent compromise
+            */
+            if (c->renderMatrices.bHasTransform)
+            {
+                _tpGLEvaluatePointForBounds(tpMat3MultVec2(&c->renderMatrices.transform, c->bounds.min), &c->bounds);
+                _tpGLEvaluatePointForBounds(tpMat3MultVec2(&c->renderMatrices.transform, tpVec2Make(c->bounds.max.x, c->bounds.min.y)), &c->bounds);
+                _tpGLEvaluatePointForBounds(tpMat3MultVec2(&c->renderMatrices.transform, tpVec2Make(c->bounds.min.x, c->bounds.max.y)), &c->bounds);
+                _tpGLEvaluatePointForBounds(tpMat3MultVec2(&c->renderMatrices.transform, c->bounds.max), &c->bounds);
+            }
+
+            _tpGLMergeBounds(&pathBounds, &c->bounds);
             ++contoursChanged;
         }
         else
@@ -3832,6 +3845,13 @@ TARP_LOCAL tpBool _tpGLDrawPathImpl(_tpGLContext * _ctx, _tpGLPath * _path, tpSt
     _tpGLPath * p = _path;
     _tpGLStyle * s = (_tpGLStyle *)_style.pointer;
     tpBool bStrokeSettingsChanged;
+    /* 
+    -1 = none, 
+    0 = context transform projection, 
+    1 = context projection, 
+    2 = contour transform projection 
+    */
+    int lastUniformMatrixSet = -1;
 
     assert(_ctx);
     assert(p && s);
@@ -3957,12 +3977,12 @@ TARP_LOCAL tpBool _tpGLDrawPathImpl(_tpGLContext * _ctx, _tpGLPath * _path, tpSt
     _tpGLUpdateVAO(&_ctx->vao, p->geometryCache.array, sizeof(tpVec2) * p->geometryCache.count);
 
     /* @TODO: Cache Uniforms loc */
-    if (s->bScaleStroke)
-        _TARP_ASSERT_NO_GL_ERROR(glUniformMatrix4fv(glGetUniformLocation(_ctx->program, "transformProjection"), 1, GL_FALSE, &_ctx->transformProjection.v[0]));
-    else
-    {
-        _TARP_ASSERT_NO_GL_ERROR(glUniformMatrix4fv(glGetUniformLocation(_ctx->program, "transformProjection"), 1, GL_FALSE, &_ctx->projection.v[0]));
-    }
+    // if (s->bScaleStroke)
+    //     _TARP_ASSERT_NO_GL_ERROR(glUniformMatrix4fv(glGetUniformLocation(_ctx->program, "transformProjection"), 1, GL_FALSE, &_ctx->transformProjection.v[0]));
+    // else
+    // {
+    //     _TARP_ASSERT_NO_GL_ERROR(glUniformMatrix4fv(glGetUniformLocation(_ctx->program, "transformProjection"), 1, GL_FALSE, &_ctx->projection.v[0]));
+    // }
 
     /* draw the fill */
     stencilPlaneToWriteTo = _bIsClipPath ? _ctx->currentClipStencilPlane : _kTpGLFillRasterStencilPlane;
@@ -3982,14 +4002,24 @@ TARP_LOCAL tpBool _tpGLDrawPathImpl(_tpGLContext * _ctx, _tpGLPath * _path, tpSt
             {
                 _tpGLContour * c = _tpGLContourArrayAtPtr(&p->contours, i);
 
-                /*if (s->bScaleStroke)
+                if (s->bScaleStroke)
                 {
-                    _TARP_ASSERT_NO_GL_ERROR(glUniformMatrix4fv(glGetUniformLocation(_ctx->program, "transformProjection"), 1, GL_FALSE, c->renderMatrices.bHasTransform ? &c->renderMatrices.transformProjection.v[0] : &_ctx->transformProjection.v[0]));
+                    if(c->renderMatrices.bHasTransform)
+                    {
+                        _TARP_ASSERT_NO_GL_ERROR(glUniformMatrix4fv(glGetUniformLocation(_ctx->program, "transformProjection"), 1, GL_FALSE, &c->renderMatrices.transformProjection.v[0]));
+                        lastUniformMatrixSet = 2;
+                    }
+                    else if(lastUniformMatrixSet != 0)
+                    {
+                        _TARP_ASSERT_NO_GL_ERROR(glUniformMatrix4fv(glGetUniformLocation(_ctx->program, "transformProjection"), 1, GL_FALSE, &_ctx->transformProjection.v[0]));
+                        lastUniformMatrixSet = 0;
+                    }
                 }
-                else
+                else if(lastUniformMatrixSet != 1)
                 {
                     _TARP_ASSERT_NO_GL_ERROR(glUniformMatrix4fv(glGetUniformLocation(_ctx->program, "transformProjection"), 1, GL_FALSE, &_ctx->projection.v[0]));
-                }*/
+                    lastUniformMatrixSet = 1;
+                }
 
                 _TARP_ASSERT_NO_GL_ERROR(glDrawArrays(GL_TRIANGLE_FAN, c->fillVertexOffset, c->fillVertexCount));
             }
@@ -4055,6 +4085,13 @@ TARP_LOCAL tpBool _tpGLDrawPathImpl(_tpGLContext * _ctx, _tpGLPath * _path, tpSt
         _TARP_ASSERT_NO_GL_ERROR(glStencilMask(_kTpGLFillRasterStencilPlane));
         _TARP_ASSERT_NO_GL_ERROR(glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT));
         _TARP_ASSERT_NO_GL_ERROR(glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE));
+
+        if (s->bScaleStroke)
+            _TARP_ASSERT_NO_GL_ERROR(glUniformMatrix4fv(glGetUniformLocation(_ctx->program, "transformProjection"), 1, GL_FALSE, &_ctx->transformProjection.v[0]));
+        else
+        {
+            _TARP_ASSERT_NO_GL_ERROR(glUniformMatrix4fv(glGetUniformLocation(_ctx->program, "transformProjection"), 1, GL_FALSE, &_ctx->projection.v[0]));
+        }
         _tpGLDrawPaint(_ctx, p, &s->fill, &p->fillGradientData);
     }
 
